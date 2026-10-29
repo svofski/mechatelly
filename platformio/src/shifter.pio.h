@@ -4,7 +4,7 @@
 // gemini-advised bit pusher
 
  static const uint16_t shifter_program_instructions[] = {
-     0x6001, //  0: out    pins, 1         ; Shift 1 bit from OSR to the designated pin
+     0x6004, //  0: out    pins, 4         ; Shift 1 bit from OSR to the designated pin
  };
 
 static const struct pio_program shifter_program = {
@@ -19,13 +19,16 @@ static inline void shifter_program_init(PIO pio, uint sm, uint offset, uint pin,
     sm_config_set_wrap(&c, offset + 0, offset + 0); // Wrap the 1-line program infinitely
 
     // Set up the GPIO pin mapping
-    sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_out_pins(&c, pin, 4);
     pio_gpio_init(pio, pin);
-    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+    pio_gpio_init(pio, pin + 1);
+    pio_gpio_init(pio, pin + 2);
+    pio_gpio_init(pio, pin + 3);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 4, true);
 
     // Configure the OSR (Output Shift Register)
-    // true = Shift right (LSB first), true = Autopull enabled, 32 = Pull whenever OSR is empty
-    sm_config_set_out_shift(&c, true, true, 32);
+    // false = Shift left (MSB first), true = Autopull enabled, 32 = Pull whenever OSR is empty
+    sm_config_set_out_shift(&c, false, true, 32);
 
     // Configure the clock divider
     sm_config_set_clkdiv(&c, div);

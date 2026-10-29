@@ -7,7 +7,6 @@
 #include "shifter.pio.h"
 
 #include "movie.h"
-#include "bunny.xbm"
 
 constexpr float GOAL_FPS = 20; // 10..40 is a good range
 
@@ -15,7 +14,7 @@ constexpr float GOAL_FPS = 20; // 10..40 is a good range
 constexpr float SUBPIXEL_CLOCK = GOAL_FPS * 32 * 32 * 8;
 
 constexpr int KICKSTART_TSTEP = 50*1000;
-constexpr int KICKSTART_DUTY = 120;
+constexpr int KICKSTART_DUTY = 100;
 constexpr int MIN_DUTY = 30;
 constexpr int MAX_DUTY = 240;
 
@@ -26,9 +25,10 @@ constexpr int PIN_W = 20;
 constexpr int PIN_SYNC = 16;  // optical sensor for line or frame sync
 constexpr int PIN_HALL = 17;  // hall sensor for BLDC commutation
 
-constexpr int PIN_LED_R = 13;
-constexpr int PIN_LED_G = 14;
-constexpr int PIN_LED_B = 15;
+constexpr int PIN_LED_R = 12;
+constexpr int PIN_LED_G = 13;
+constexpr int PIN_LED_B = 14;
+constexpr int PIN_LED_T = 15;
 
 volatile int32_t interrupt_counter = 0, last_interrupt_counter = 0;
 
@@ -67,15 +67,23 @@ int shifter_sm;
 int shifter_offset;
 int shifter_dma_chan = -1;
 
+// RGBT format (rgb + tone)
+// movie packed data: 
+// uint16_t: rrrrgggg bbbbtttt, where r,g,b in 0..8, t unsure
+// PIO unpacked: 
+// uint32_t rgbtrgbt 
+//          rgbtrgbt 
+//          rgbtrgbt 
+//          rgbtrgbt 
+
 constexpr int NPIXELS = 32 * 32;
-uint32_t test_pixels_u32[NPIXELS/4];
+uint32_t test_pixels_u32[NPIXELS];
 uint8_t *test_pixels_u8 = (uint8_t *)test_pixels_u32;
 
-constexpr int FRAME_NBYTES = NPIXELS; // will be x4 with RGBT, or maybe even x8
+constexpr int FRAME_NBYTES = NPIXELS * 4;
 
 volatile int send_pixels = 0;
 int frame_pixel_pos = 0;
-constexpr uint32_t frame_end_pos = NPIXELS/4;
 
 // measure idle time between frames
 uint64_t idle_us_prev = micros();
@@ -153,36 +161,6 @@ void sync_interrupt()
     ++send_pixels;
 }
 
-void create_bunny()
-{
-    int ofs = 0;
-    constexpr int stride = 32/8;
-    for (int row = 0; row < 32; ++row) {
-        for (int col = 0; col < stride; ++col) {
-            uint8_t pixels = bunny_bits[row * stride + col];
-
-            for (int i = 0; i < 8; ++i) {
-                test_pixels_u8[ofs++] = (pixels & 0x01) ? 0xff : 0x00;
-                pixels >>= 1;
-            }
-        }
-    }
-}
-
-void create_test_pattern()
-{
-    for (int r = 0; r < 32; ++r) {
-        for (int i = 0; i < 32; ++i) {
-            test_pixels_u8[r * 32 + i] = ((i & 4) ^ (r & 4)) ? 0xff : 0x00;
-        }
-    }
-
-    for (int i = 0; i < 32/4; ++i) {
-        Serial.printf("%d: %08x\n", i, test_pixels_u32[i]);
-    }
-    Serial.println("------------");
-}
-
 void pio_shifter_init()
 {
     shifter_sm = pio_claim_unused_sm(shifter_pio, true);
@@ -193,7 +171,7 @@ void pio_shifter_init()
     Serial.printf("shifter program offset=%d clkdiv=\n", shifter_offset); Serial.println(clk_div);
 
     //create_test_pattern();
-    create_bunny();
+    create_bunny(test_pixels_u32);
 }
 
 void setup()
@@ -365,7 +343,7 @@ void dma_shift_pixels()
     dma_channel_configure(shifter_dma_chan, &cfg, 
             &shifter_pio->txf[shifter_sm], /* write addr */
             &test_pixels_u32[0], /* read addr */
-            dma_encode_transfer_count(FRAME_NBYTES/4),
+            dma_encode_transfer_count(NPIXELS),
             true /* start transfer */);
 }
 
@@ -390,15 +368,9 @@ void loop() {
 
         dma_shift_pixels();
 
-        //for (int i = 0; i < frame_end_pos; i++) {
-        //    pio_sm_put_blocking(shifter_pio, shifter_sm, test_pixels_u32[i]);
-        //    if (send_pixels > 0) {
-        //        break;
-        //    }
-        //}
 
         //if (movie_frame < 175) 
-        movie_get_next_frame(test_pixels_u8);
+        movie_get_next_frame_rgbt(test_pixels_u32);
     }
 }
 
