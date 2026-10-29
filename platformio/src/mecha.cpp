@@ -2,17 +2,12 @@
 #include "pico/stdlib.h"
 #include "hardware/timer.h"
 #include "hardware/pio.h"
+#include "hardware/dma.h"
 #include "pico/multicore.h"
 #include "shifter.pio.h"
 
+#include "movie.h"
 #include "bunny.xbm"
-
-#define GRUU_PICO 1
-
-// timer control loop runs too hot, perhaps needs substep adjustment
-// runs +10..15 duty cycle hotter for same rpm: 111 vs 125 for 25 rps
-#define WITH_TIMER 0
-#define CORE1_MOTOR 1
 
 constexpr float GOAL_FPS = 20; // 10..40 is a good range
 
@@ -20,7 +15,7 @@ constexpr float GOAL_FPS = 20; // 10..40 is a good range
 constexpr float SUBPIXEL_CLOCK = GOAL_FPS * 32 * 32 * 8;
 
 constexpr int KICKSTART_TSTEP = 50*1000;
-constexpr int KICKSTART_DUTY = 80;
+constexpr int KICKSTART_DUTY = 120;
 constexpr int MIN_DUTY = 30;
 constexpr int MAX_DUTY = 240;
 
@@ -57,17 +52,9 @@ volatile float lps = GOAL_FPS;
 volatile float exact_rps = GOAL_FPS;
 volatile uint64_t diff_us = 1000;
 
-#if WITH_TIMER
-repeating_timer_t motor_timer;
-bool timer_callback(repeating_timer_t *rt);
-void start_timer(int32_t us);
-volatile int timer_cnt = 0;
-#endif
-#if CORE1_MOTOR
 volatile bool step_reset = false;
 volatile bool request_restart_motor = false;
 void motor_loop();
-#endif
 
 // sync
 volatile int hsync_interrupt_counter = 0;
@@ -78,27 +65,29 @@ volatile uint64_t last_sync_us = 0;
 PIO shifter_pio = pio1;
 int shifter_sm;
 int shifter_offset;
+int shifter_dma_chan = -1;
 
 constexpr int NPIXELS = 32 * 32;
 uint32_t test_pixels_u32[NPIXELS/4];
 uint8_t *test_pixels_u8 = (uint8_t *)test_pixels_u32;
 
+constexpr int FRAME_NBYTES = NPIXELS; // will be x4 with RGBT, or maybe even x8
+
 volatile int send_pixels = 0;
 int frame_pixel_pos = 0;
 constexpr uint32_t frame_end_pos = NPIXELS/4;
 
+// measure idle time between frames
+uint64_t idle_us_prev = micros();
+uint64_t idle_us_avg = 0;
+
 
 void restart_motor()
 {
-#if CORE1_MOTOR
     if (get_core_num() == 0) {
         request_restart_motor = true;
         Serial.println("restart_motor requested");
     }
-#endif
-#if WITH_TIMER
-    cancel_repeating_timer(&motor_timer);
-#endif
     analogWriteFreq(20000);
     analogWriteResolution(8);
 
@@ -121,9 +110,6 @@ void restart_motor()
     hsync_interrupt_counter = 0;
     last_sync_us = time_us_64();
 
-#if WITH_TIMER
-    start_timer(ramp_us);
-#endif
     interrupts();
 }
 
@@ -140,14 +126,8 @@ void hall_interrupt()
 
     if (ramp_done) {
         noInterrupts();
-#if WITH_TIMER
-        seq_pos = 5 * 3;
-        start_timer(tstep);
-#endif
-#if CORE1_MOTOR
         seq_pos = 0 * 3;
         step_reset = true;
-#endif
         interrupts();
     }
 }
@@ -169,35 +149,8 @@ void sync_interrupt()
     ++hsync_interrupt_counter;
 
     // add a little centering offset 
-    add_alarm_in_us(diff_us/32/8, start_frame_cb, nullptr, false);
-    //++send_pixels; // no delay
-}
-
-void diagnose_pio(PIO pio, uint sm) {
-    uint pio_index = pio_get_index(pio);
-    Serial.printf("\n=== PIO %d | State Machine %d Diagnostic ===\n", pio_index, sm);
-
-    // 1. Check Global Enable Register (CTRL)
-    uint32_t ctrl = pio->ctrl;
-    bool is_enabled = (ctrl & (1u << sm)) != 0;
-    Serial.printf("State Machine Enabled: %s (CTRL Reg: 0x%08X)\n", is_enabled ? "YES" : "NO", ctrl);
-
-    // 2. Check FIFO Status (FSTAT Register)
-    uint32_t fstat = pio->fstat;
-    bool tx_full  = (fstat & (1u << (PIO_FSTAT_TXFULL_LSB + sm))) != 0;
-    bool tx_empty = (fstat & (1u << (PIO_FSTAT_TXEMPTY_LSB + sm))) != 0;
-    Serial.printf("TX FIFO State:        %s %s (FSTAT Reg: 0x%08X)\n", 
-                  tx_full ? "[FULL - BLOCKED]" : "", tx_empty ? "[EMPTY]" : "[HAS DATA]");
-
-    // 3. Inspect Current Program Counter (SM PC)
-    uint32_t pc = pio_sm_get_pc(pio, sm);
-    Serial.printf("Current Execution PC:  %d (Memory Address Slot)\n", pc);
-
-    // 4. Force Capture of Registers X, Y, and OSR
-    // We safely use pio_sm_exec to make the SM output its registers to us on demand
-    uint32_t current_instr = pio->sm[sm].instr;
-    Serial.printf("Next Hardware Instr:  0x%08X\n", current_instr);
-    Serial.println("============================================\n");
+    //add_alarm_in_us(diff_us/32/8, start_frame_cb, nullptr, false);
+    ++send_pixels;
 }
 
 void create_bunny()
@@ -230,7 +183,7 @@ void create_test_pattern()
     Serial.println("------------");
 }
 
-void shifter_init()
+void pio_shifter_init()
 {
     shifter_sm = pio_claim_unused_sm(shifter_pio, true);
     shifter_offset = pio_add_program(shifter_pio, &shifter_program);
@@ -248,6 +201,9 @@ void setup()
     Serial.begin(115200);
 
     delay(1000);
+
+    // delay until the host answers to serial connection
+    // a nice safety mechanism during debuggin
     while (!Serial) {
         delay(10); 
     }  
@@ -281,18 +237,15 @@ void setup()
 
     last_millis = millis();
 
-#if CORE1_MOTOR
     multicore_launch_core1(motor_loop);
-#else
-    attachInterrupt(PIN_HALL, hall_interrupt, FALLING);
-    restart_motor();
-#endif
 
     attachInterrupt(PIN_SYNC, sync_interrupt, RISING);
 
-    shifter_init();
+    pio_shifter_init();
 
     //diagnose_pio(shifter_pio, shifter_sm);
+
+    movie_open();
 }
 
 // trapezoidal sequence
@@ -305,41 +258,6 @@ const uint8_t comm_seq[] {
     0, 0, 1,
     1, 0, 1};
 
-#if WITH_TIMER
-bool timer_callback(repeating_timer_t *rt)
-{
-    ++timer_cnt;
-
-    int sp = seq_pos;
-    analogWrite(PIN_U, comm_seq[sp + 0] ? duty : 0);
-    analogWrite(PIN_V, comm_seq[sp + 1] ? duty : 0);
-    analogWrite(PIN_W, comm_seq[sp + 2] ? duty : 0);
-
-    noInterrupts();
-    seq_pos = seq_pos - 3;
-    if (seq_pos < 0) seq_pos = sizeof(comm_seq) - 3;
-    interrupts();
-
-    if (!ramp_done) {
-        if (interrupt_counter > 6) {
-            ramp_done = true;
-            last_millis = millis();
-        }
-    }
-
-    return true;
-}
-
-void start_timer(int32_t us)
-{
-    cancel_repeating_timer(&motor_timer);
-    if (!add_repeating_timer_us(-us, timer_callback, nullptr, &motor_timer)) {
-        Serial.println("Failed to create timer");
-    }
-}
-#endif
-
-#if CORE1_MOTOR
 void motor_loop()
 {
     attachInterrupt(PIN_HALL, hall_interrupt, FALLING);
@@ -403,7 +321,6 @@ void motor_loop()
                 Serial.printf("stall 2: rps=%f interrupt_counter=%d last=%d\n", rps, interrupt_counter, last_interrupt_counter);
                 restart_motor();
                 continue;
-                //return;
             }
 
             float error = rps - GOAL_FPS;
@@ -424,26 +341,46 @@ void motor_loop()
             Serial.print(" rps="); Serial.print(rps);
             Serial.print(" lps="); Serial.print(lps);
             Serial.print(" diff_us="); Serial.print(diff_us);
-            Serial.print(" hsync="); Serial.println(hsync_interrupt_counter);
-#if WITH_TIMER
-            Serial.printf(" timer_cnt=%d\n", timer_cnt);
-#endif
+            Serial.print(" hsync="); Serial.print(hsync_interrupt_counter);
+            Serial.print(" idle_us="); Serial.println(idle_us_avg);
             last_interrupt_counter = interrupt_counter; 
         }
     }
 }
-#endif
+
+void dma_shift_pixels()
+{
+    if (shifter_dma_chan < 0) {
+        shifter_dma_chan = dma_claim_unused_channel(true);
+    }
+    dma_channel_abort(shifter_dma_chan);
+    //pio_sm_clear_fifos(shifter_pio, shifter_sm);
+
+    dma_channel_config_t cfg = dma_channel_get_default_config(shifter_dma_chan);
+    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
+    channel_config_set_read_increment(&cfg, true);
+    channel_config_set_write_increment(&cfg, false);
+    channel_config_set_irq_quiet(&cfg, true);
+    channel_config_set_dreq(&cfg, pio_get_dreq(shifter_pio, shifter_sm, true));
+    dma_channel_configure(shifter_dma_chan, &cfg, 
+            &shifter_pio->txf[shifter_sm], /* write addr */
+            &test_pixels_u32[0], /* read addr */
+            dma_encode_transfer_count(FRAME_NBYTES/4),
+            true /* start transfer */);
+}
 
 void loop() {
     while (send_pixels > 0) {
+        idle_us_avg = (micros() - idle_us_prev) / 2;
+        idle_us_prev = micros();
         noInterrupts();
         exact_rps = 1.0e6f / diff_us;
         float subpixel_clock = 32*32*8 * exact_rps;
         interrupts();
 
         --send_pixels;
+        // detect overruns
         if (send_pixels > 0) {
-            //Serial.printf("overrun: %d\n", send_pixels);
             subpixel_clock *= 1.01f;
             send_pixels = 0;
         }
@@ -451,12 +388,17 @@ void loop() {
         float clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
         shifter_program_init(shifter_pio, shifter_sm, shifter_offset, PIN_LED_R, clk_div);
 
-        for (int i = 0; i < frame_end_pos; i++) {
-            pio_sm_put_blocking(shifter_pio, shifter_sm, test_pixels_u32[i]);
-            if (send_pixels > 0) {
-                break;
-            }
-        }
+        dma_shift_pixels();
+
+        //for (int i = 0; i < frame_end_pos; i++) {
+        //    pio_sm_put_blocking(shifter_pio, shifter_sm, test_pixels_u32[i]);
+        //    if (send_pixels > 0) {
+        //        break;
+        //    }
+        //}
+
+        //if (movie_frame < 175) 
+        movie_get_next_frame(test_pixels_u8);
     }
 }
 
