@@ -15,10 +15,14 @@ uint32_t rgbt_unpack(uint8_t rg, uint8_t bt)
     uint8_t nt = bt & 0xf;
 
     // swizzle rgbt
-    uint32_t t = 0x88888888 << ((8 - nt) * 4);
-    uint32_t b = 0x44444444 << ((8 - nb) * 4);
-    uint32_t g = 0x22222222 << ((8 - ng) * 4);
-    uint32_t r = 0x11111111 << ((8 - nr) * 4);
+    //uint32_t t = 0x88888888 << ((8 - nt/1) * 4);
+    uint32_t t =  (nt & 8) ? 0x80008000 : 0;
+             t |= (nt & 4) ? 0x08000800 : 0;
+             t |= (nt & 2) ? 0x00800080 : 0;
+             t |= (nt & 1) ? 0x00080008 : 0;
+    uint32_t b = 0x44444444 << ((8 - nb/1) * 4);
+    uint32_t g = 0x22222222 << ((8 - ng/1) * 4);
+    uint32_t r = 0x11111111 << ((8 - nr/1) * 4);
 
     return r | g | b | t;
 }
@@ -30,7 +34,8 @@ int movie_open()
         return -1;
     }
 
-    file = LittleFS.open("/bunny_rgbt.bin", "r");
+    //file = LittleFS.open("/ccarrot.bin", "r");
+    file = LittleFS.open("/cboop.bin", "r");
     if (!file) {
         Serial.println("Failed to open movie");
         return -1;
@@ -84,7 +89,7 @@ void create_bunny(uint32_t *dst)
                 uint8_t rg = (pixels & 0x01) ? 0x80 : 0x00;
                 uint8_t bt = (pixels & 0x01) ? 0x00 : 0x00;
                 *dst = rgbt_unpack(rg, bt);
-                Serial.printf("B[%02x,%02x]->%08x\n", rg, bt, *dst);
+                //Serial.printf("B[%02x,%02x]->%08x\n", rg, bt, *dst);
                 dst++;
                 pixels >>= 1;
             }

@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "pico/platform/common.h"
 #include "pico/stdlib.h"
 #include "hardware/timer.h"
 #include "hardware/pio.h"
@@ -77,8 +78,11 @@ int shifter_dma_chan = -1;
 //          rgbtrgbt 
 
 constexpr int NPIXELS = 32 * 32;
-uint32_t test_pixels_u32[NPIXELS];
+
+uint32_t test_pixels_u32[NPIXELS * 2];
 uint8_t *test_pixels_u8 = (uint8_t *)test_pixels_u32;
+
+int pingpong_rd = 0;  // write = pingpong_rd ^1
 
 constexpr int FRAME_NBYTES = NPIXELS * 4;
 
@@ -86,9 +90,8 @@ volatile int send_pixels = 0;
 int frame_pixel_pos = 0;
 
 // measure idle time between frames
-uint64_t idle_us_prev = micros();
-uint64_t idle_us_avg = 0;
-
+//uint64_t idle_us_prev = micros();
+//uint64_t idle_us_avg = 0;
 
 void restart_motor()
 {
@@ -302,7 +305,7 @@ void motor_loop()
             }
 
             float error = rps - GOAL_FPS;
-            constexpr float PID_I = 1.f / fac;
+            constexpr float PID_I = 1.0f / fac;
             if (fabs(error) > 0.1f) {
                 if (error > 0) {
                     fduty -= error * PID_I;
@@ -319,8 +322,8 @@ void motor_loop()
             Serial.print(" rps="); Serial.print(rps);
             Serial.print(" lps="); Serial.print(lps);
             Serial.print(" diff_us="); Serial.print(diff_us);
-            Serial.print(" hsync="); Serial.print(hsync_interrupt_counter);
-            Serial.print(" idle_us="); Serial.println(idle_us_avg);
+            Serial.print(" hsync="); Serial.println(hsync_interrupt_counter);
+            //Serial.print(" idle_us="); Serial.println(idle_us_avg);
             last_interrupt_counter = interrupt_counter; 
         }
     }
@@ -331,7 +334,7 @@ void dma_shift_pixels()
     if (shifter_dma_chan < 0) {
         shifter_dma_chan = dma_claim_unused_channel(true);
     }
-    dma_channel_abort(shifter_dma_chan);
+    //dma_channel_abort(shifter_dma_chan);
     //pio_sm_clear_fifos(shifter_pio, shifter_sm);
 
     dma_channel_config_t cfg = dma_channel_get_default_config(shifter_dma_chan);
@@ -342,15 +345,19 @@ void dma_shift_pixels()
     channel_config_set_dreq(&cfg, pio_get_dreq(shifter_pio, shifter_sm, true));
     dma_channel_configure(shifter_dma_chan, &cfg, 
             &shifter_pio->txf[shifter_sm], /* write addr */
-            &test_pixels_u32[0], /* read addr */
-            dma_encode_transfer_count(NPIXELS),
-            true /* start transfer */);
+            &test_pixels_u32[NPIXELS * pingpong_rd],
+            dma_encode_transfer_count(NPIXELS - 32), // sacrifice pixels for stability
+            false /* start transfer */);
+    //pio_sm_clear_fifos(shifter_pio, shifter_sm);
+    //while (dma_channel_is_busy(shifter_dma_chan)) tight_loop_contents();
+    dma_channel_abort(shifter_dma_chan);
+    dma_channel_start(shifter_dma_chan);
 }
 
 void loop() {
     while (send_pixels > 0) {
-        idle_us_avg = (micros() - idle_us_prev) / 2;
-        idle_us_prev = micros();
+        //idle_us_avg = (micros() - idle_us_prev) / 2;
+        //idle_us_prev = micros();
         noInterrupts();
         exact_rps = 1.0e6f / diff_us;
         float subpixel_clock = 32*32*8 * exact_rps;
@@ -359,6 +366,7 @@ void loop() {
         --send_pixels;
         // detect overruns
         if (send_pixels > 0) {
+            //Serial.println("underrun!");
             subpixel_clock *= 1.01f;
             send_pixels = 0;
         }
@@ -368,9 +376,12 @@ void loop() {
 
         dma_shift_pixels();
 
+        // freeze frame
+        //if (movie_frame >= 1)
+        //    continue;
 
-        //if (movie_frame < 175) 
-        movie_get_next_frame_rgbt(test_pixels_u32);
+        movie_get_next_frame_rgbt(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+        pingpong_rd ^= 1;
     }
 }
 
