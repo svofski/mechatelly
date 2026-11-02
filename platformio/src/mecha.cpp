@@ -1,4 +1,11 @@
 #include <Arduino.h>
+#define PDM 0
+#define PWMAUDIO 1
+
+#if PWMAUDIO
+#include <PWMAudio.h>
+#endif
+
 #include "pico/platform/common.h"
 #include "pico/stdlib.h"
 #include "hardware/timer.h"
@@ -50,7 +57,6 @@ int duty = 0;
 
 volatile float rps = GOAL_FPS;
 volatile float lps = GOAL_FPS;
-volatile float exact_rps = GOAL_FPS;
 volatile uint64_t diff_us = 1000;
 
 volatile bool step_reset = false;
@@ -82,16 +88,33 @@ constexpr int NPIXELS = 32 * 32;
 uint32_t test_pixels_u32[NPIXELS * 2];
 uint8_t *test_pixels_u8 = (uint8_t *)test_pixels_u32;
 
+// pcm sound buffer: sample rate = 1/2 pixel rate, pingpong 
+uint32_t pcm_sound_u32[NPIXELS / 2 / sizeof(uint32_t) * 2];
+uint8_t *pcm_sound_u8 = (uint8_t *)pcm_sound_u32;
+
 int pingpong_rd = 0;  // write = pingpong_rd ^1
 
-constexpr int FRAME_NBYTES = NPIXELS * 4;
+constexpr uint FRAME_NBYTES = NPIXELS * 4;
+constexpr uint FRAME_NSAMPLES = NPIXELS / 2;
 
 volatile int send_pixels = 0;
 int frame_pixel_pos = 0;
 
-// measure idle time between frames
-//uint64_t idle_us_prev = micros();
-//uint64_t idle_us_avg = 0;
+#if PWMAUDIO
+PWMAudio pwm(1);
+uint32_t pwm_read_index = FRAME_NSAMPLES;
+
+void pwmaudio_cb()
+{
+    uint32_t base = pingpong_rd ? FRAME_NSAMPLES : 0;
+    while (pwm.availableForWrite()) {
+        pwm.write(((int16_t)pcm_sound_u8[base + pwm_read_index] - 128) << 8);
+        if (++pwm_read_index >= FRAME_NSAMPLES) {
+            pwm_read_index = 0;
+        }
+    }
+}
+#endif
 
 void restart_motor()
 {
@@ -227,6 +250,11 @@ void setup()
     //diagnose_pio(shifter_pio, shifter_sm);
 
     movie_open();
+
+#if PWMAUDIO
+    pwm.onTransmit(pwmaudio_cb);
+    pwm.begin(10240);
+#endif
 }
 
 // trapezoidal sequence
@@ -316,14 +344,12 @@ void motor_loop()
                 duty = constrain(round(fduty), MIN_DUTY, MAX_DUTY);
             }
 
-            //Serial.print("interrupt_counter"); Serial.print(interrupt_counter);
-            Serial.printf("duty=%d ", duty);
-            Serial.print(" tstep="); Serial.print(tstep);
-            Serial.print(" rps="); Serial.print(rps);
-            Serial.print(" lps="); Serial.print(lps);
-            Serial.print(" diff_us="); Serial.print(diff_us);
-            Serial.print(" hsync="); Serial.println(hsync_interrupt_counter);
-            //Serial.print(" idle_us="); Serial.println(idle_us_avg);
+            //Serial.printf("duty=%d ", duty);
+            //Serial.print(" tstep="); Serial.print(tstep);
+            //Serial.print(" rps="); Serial.print(rps);
+            //Serial.print(" lps="); Serial.print(lps);
+            //Serial.print(" diff_us="); Serial.print(diff_us);
+            //Serial.print(" hsync="); Serial.println(hsync_interrupt_counter);
             last_interrupt_counter = interrupt_counter; 
         }
     }
@@ -354,34 +380,44 @@ void dma_shift_pixels()
     dma_channel_start(shifter_dma_chan);
 }
 
+float subpixel_clock = 32 * 32 * 8 * GOAL_FPS;
+float clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
+    
 void loop() {
     while (send_pixels > 0) {
-        //idle_us_avg = (micros() - idle_us_prev) / 2;
-        //idle_us_prev = micros();
-        noInterrupts();
-        exact_rps = 1.0e6f / diff_us;
-        float subpixel_clock = 32*32*8 * exact_rps;
-        interrupts();
-
         --send_pixels;
-        // detect overruns
         if (send_pixels > 0) {
             //Serial.println("underrun!");
             subpixel_clock *= 1.01f;
             send_pixels = 0;
         }
 
-        float clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
-        shifter_program_init(shifter_pio, shifter_sm, shifter_offset, PIN_LED_R, clk_div);
-
+        pio_sm_set_clkdiv(shifter_pio, shifter_sm, clk_div);
         dma_shift_pixels();
 
         // freeze frame
         //if (movie_frame >= 1)
         //    continue;
 
+#if PDM
         movie_get_next_frame_rgbt(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+#endif
+#if PWMAUDIO
+        movie_get_next_frame_rgbt_pcm(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)],
+                &pcm_sound_u8[FRAME_NSAMPLES * (pingpong_rd ^ 1)]);
+#endif
+
         pingpong_rd ^= 1;
+        pwm_read_index = 0;
     }
+    noInterrupts();
+    uint64_t diffus_copy = diff_us;
+    interrupts();
+
+    // prepare clocks for the next frame
+    float exact_rps = 1.0e6f / diffus_copy;
+    subpixel_clock = 32 * 32 * 8 * exact_rps;
+    clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
+    //exact_sr = 32*32/2 * exact_rps;
 }
 
