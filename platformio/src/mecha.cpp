@@ -1,6 +1,12 @@
+#include "pico/platform/sections.h"
 #include <Arduino.h>
 #define PDM 0
 #define PWMAUDIO 1
+#define SYNC_INTERRUPT 1
+
+#define MODE_MOVIE 1
+#define MODE_HEART 0
+#define MODE_DISPLAYRPS 0
 
 #if PWMAUDIO
 #include <PWMAudio.h>
@@ -15,6 +21,8 @@
 #include "shifter.pio.h"
 
 #include "movie.h"
+#include "text.h"
+
 
 constexpr float GOAL_FPS = 20; // 10..40 is a good range
 
@@ -68,6 +76,8 @@ volatile int hsync_interrupt_counter = 0;
 volatile int last_hsync_interrupt_counter = 0;
 volatile uint64_t last_sync_us = 0;
 
+char text_buf[32];
+
 // frame and pio
 PIO shifter_pio = pio1;
 int shifter_sm;
@@ -103,6 +113,8 @@ int frame_pixel_pos = 0;
 #if PWMAUDIO
 PWMAudio pwm(1);
 uint32_t pwm_read_index = FRAME_NSAMPLES;
+
+void __not_in_flash_func(sync_interrupt)(void);
 
 void pwmaudio_cb()
 {
@@ -172,21 +184,6 @@ int64_t start_frame_cb(alarm_id_t id, void *user_data)
     return 0; // do not reschedule
 }
 
-void sync_interrupt()
-{
-    uint64_t nowus = time_us_64();
-    uint64_t newdiff = nowus - last_sync_us;
-    if (newdiff < 3000) return; // filter out obvious misfires
-    diff_us = newdiff;
-    last_sync_us = nowus;
-
-    ++hsync_interrupt_counter;
-
-    // add a little centering offset 
-    //add_alarm_in_us(diff_us/32/8, start_frame_cb, nullptr, false);
-    ++send_pixels;
-}
-
 void pio_shifter_init()
 {
     shifter_sm = pio_claim_unused_sm(shifter_pio, true);
@@ -196,8 +193,6 @@ void pio_shifter_init()
 
     Serial.printf("shifter program offset=%d clkdiv=\n", shifter_offset); Serial.println(clk_div);
 
-    //create_test_pattern();
-    create_bunny(test_pixels_u32);
 }
 
 void setup()
@@ -243,13 +238,19 @@ void setup()
 
     multicore_launch_core1(motor_loop);
 
+#if SYNC_INTERRUPT
     attachInterrupt(PIN_SYNC, sync_interrupt, RISING);
+#endif
 
     pio_shifter_init();
 
     //diagnose_pio(shifter_pio, shifter_sm);
 
+    //create_test_pattern();
+    create_bunny(test_pixels_u32);
     movie_open();
+    text_begin();
+    text_draw_str(0, 28, "ALL HAIL THE HYPNOTOAD");
 
 #if PWMAUDIO
     pwm.onTransmit(pwmaudio_cb);
@@ -355,7 +356,7 @@ void motor_loop()
     }
 }
 
-void dma_shift_pixels()
+void __not_in_flash_func(dma_shift_pixels)()
 {
     if (shifter_dma_chan < 0) {
         shifter_dma_chan = dma_claim_unused_channel(true);
@@ -380,11 +381,37 @@ void dma_shift_pixels()
     dma_channel_start(shifter_dma_chan);
 }
 
+void __not_in_flash_func(sync_interrupt)()
+{
+    uint64_t nowus = time_us_64();
+    uint64_t newdiff = nowus - last_sync_us;
+    if (newdiff < 3000) return; // filter out obvious misfires
+    diff_us = newdiff;
+    last_sync_us = nowus;
+
+    ++hsync_interrupt_counter;
+
+    // add a little centering offset 
+    //add_alarm_in_us(diff_us/32/8, start_frame_cb, nullptr, false);
+
+    //dma_shift_pixels();
+    ++send_pixels;
+}
+
+
 float subpixel_clock = 32 * 32 * 8 * GOAL_FPS;
 float clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
+
+int text_x = 0;;
     
-void loop() {
-    while (send_pixels > 0) {
+void __not_in_flash_func(loop)() {
+#ifndef SYNC_INTERRUPT
+    while ((sio_hw->gpio_in & (1ul << PIN_SYNC)) != 0) tight_loop_contents();
+    while ((sio_hw->gpio_in & (1ul << PIN_SYNC)) == 0) tight_loop_contents();
+    sync_interrupt();
+#endif
+
+    if (send_pixels > 0) {
         --send_pixels;
         if (send_pixels > 0) {
             //Serial.println("underrun!");
@@ -392,32 +419,43 @@ void loop() {
             send_pixels = 0;
         }
 
-        pio_sm_set_clkdiv(shifter_pio, shifter_sm, clk_div);
+        //pio_sm_set_clkdiv(shifter_pio, shifter_sm, clk_div);
         dma_shift_pixels();
 
         // freeze frame
-        //if (movie_frame >= 1)
-        //    continue;
-
-#if PDM
-        movie_get_next_frame_rgbt(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+        if (true || movie_frame < 5) {
+#if MODE_MOVIE
+            movie_get_next_frame_rgbt_pcm(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)],
+                    &pcm_sound_u8[FRAME_NSAMPLES * (pingpong_rd ^ 1)]);
+#elif MODE_DISPLAYRPS
+            movie_heartbeat(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+            snprintf(text_buf, sizeof(text_buf), "%d", (int)rps); 
+            text_draw_str(0, 24, text_buf);
+            text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
+#elif MODE_HEART
+            movie_heartbeat(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+            text_draw_str(-text_x, 24, "  Like!  ");
+            text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
+            text_x += 1;
+            if (text_x >= 256) {
+                text_x = -38;
+            }
 #endif
-#if PWMAUDIO
-        movie_get_next_frame_rgbt_pcm(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)],
-                &pcm_sound_u8[FRAME_NSAMPLES * (pingpong_rd ^ 1)]);
-#endif
 
-        pingpong_rd ^= 1;
-        pwm_read_index = 0;
+            pingpong_rd ^= 1;
+            pwm_read_index = 0;
+        }
+
+        noInterrupts();
+        uint64_t diffus_copy = diff_us;
+        interrupts();
+
+        // prepare clocks for the next frame
+        float exact_rps = 1.0e6f / diffus_copy;
+        subpixel_clock = 32 * 32 * 8 * exact_rps;
+        clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
+        pio_sm_set_clkdiv(shifter_pio, shifter_sm, clk_div);
+        //exact_sr = 32*32/2 * exact_rps;
     }
-    noInterrupts();
-    uint64_t diffus_copy = diff_us;
-    interrupts();
-
-    // prepare clocks for the next frame
-    float exact_rps = 1.0e6f / diffus_copy;
-    subpixel_clock = 32 * 32 * 8 * exact_rps;
-    clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
-    //exact_sr = 32*32/2 * exact_rps;
 }
 

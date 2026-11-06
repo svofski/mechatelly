@@ -2,6 +2,8 @@
 #include <LittleFS.h>
 
 #include "bunny.xbm"
+#include "heart1.xbm"
+#include "heart2.xbm"
 
 int movie_nframes = 0;
 int movie_frame = 0;
@@ -145,24 +147,53 @@ void movie_get_next_frame(uint8_t *dst)
     }
 }
 
-void create_bunny(uint32_t *dst)
+void copy_xbm(uint32_t *dst, const uint8_t *xbm, 
+        uint8_t r1, uint8_t g1, uint8_t b1,
+        uint8_t r0, uint8_t g0, uint8_t b0
+        )
 {
     int ofs = 0;
     constexpr int stride = 32/8;
+
+    uint8_t rg1 = ((r1 << 4) | g1);
+    uint8_t bt1 = (b1 << 4);
+
+    uint8_t rg0 = ((r0 << 4) | g0);
+    uint8_t bt0 = (b0 << 4);
+
     for (int row = 0; row < 32; ++row) {
         for (int col = 0; col < stride; ++col) {
-            uint8_t pixels = bunny_bits[row * stride + col];
+            uint8_t pixels = xbm[row * stride + col];
 
             for (int i = 0; i < 8; ++i) {
-                uint8_t rg = (pixels & 0x01) ? 0x80 : 0x00;
-                uint8_t bt = (pixels & 0x01) ? 0x00 : 0x00;
+                uint8_t rg = (pixels & 0x01) ? rg1 : rg0;
+                uint8_t bt = (pixels & 0x01) ? bt1 : bt0;
                 *dst = rgbt_unpack(rg, bt);
-                //Serial.printf("B[%02x,%02x]->%08x\n", rg, bt, *dst);
                 dst++;
                 pixels >>= 1;
             }
         }
     }
+}
+
+void create_bunny(uint32_t *dst)
+{
+    copy_xbm(dst, bunny_bits, 8, 8, 8, 0, 0, 0);
+}
+
+void movie_clear(uint32_t *dst)
+{
+    memset(dst, 0, 32*32);
+}
+
+void movie_heartbeat(uint32_t *dst)
+{
+    static uint8_t heart_frame = 0;
+    const uint8_t * bits = (heart_frame & 8) ? heart1_bits : heart2_bits;
+    copy_xbm(dst, bits, 
+            0, 0, 0,
+            8, 0, 0);
+    ++heart_frame;
 }
 
 #if 0
