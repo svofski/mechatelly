@@ -1,0 +1,4 @@
+.cache
+.pio
+data.bak
+compile_commands.json

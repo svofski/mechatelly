@@ -1,14 +1,26 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 
+#include "dzx0.h"
+
 #include "bunny.xbm"
 #include "heart1.xbm"
 #include "heart2.xbm"
 
+enum _movie_mode {
+    MM_NONE,
+    MM_PCM,
+    MM_ZX0
+};
+
 int movie_nframes = 0;
 int movie_frame = 0;
+int movie_mode = MM_PCM;
 static Dir dir;
 static File file;
+
+// 32*32*4
+static uint8_t frame_buf[32 * 32 * 2];
 
 uint32_t rgbt_unpack(uint8_t rg, uint8_t bt)
 {
@@ -57,10 +69,22 @@ int movie_open()
     return 0;
 }
 
+int read_cb(void *buf, size_t sz)
+{
+    if (file) {
+        return file.read((uint8_t *)buf, sz);
+    }
+    return 0;
+}
+
 int movie_next_file()
 {
     if (file) {
+        if (movie_mode == MM_ZX0) {
+            dzx0_end();
+        }
         file.close();
+        movie_mode = MM_NONE;
     }
 
     if (!dir.next()) {
@@ -76,16 +100,30 @@ int movie_next_file()
         return -1;
     }
 
-    movie_nframes = file.size() / (32 * 32);
-    movie_frame = 0;
-    Serial.printf("Opened %s: %d bytes (%d frames)\n", 
-            file.name(), file.size(), movie_nframes);
+    const char * name = file.name();
+    size_t len = strlen(name);
+    if (len >= 4 && 0 == strcasecmp(".pcz", name + strlen(name) - 4)) {
+        movie_mode = MM_ZX0;
+        if (dzx0_begin(read_cb, frame_buf, true) != 0) {
+            Serial.println("dzx0_begin failed (malloc fail?)");
+            return -1;
+        }
+
+        Serial.printf("Opened zx0 compressed stream %s: %d bytes\n",
+                file.name(), file.size());
+    }
+    else {
+        movie_mode = MM_PCM;
+
+        movie_nframes = file.size() / (32 * 32);
+        movie_frame = 0;
+        Serial.printf("Opened %s: %d bytes (%d frames)\n", 
+                file.name(), file.size(), movie_nframes);
+    }
 
     return 0;
 }
 
-// 32*32*4
-static uint8_t frame_buf[32 * 32 * 2];
 void movie_get_next_frame_rgbt(uint32_t *dst)
 {
     if (!file || !file.available()) {
@@ -113,7 +151,35 @@ void movie_get_next_frame_rgbt_pcm(uint32_t *dst, uint8_t *dstpcm)
     if (!file) {
         return;
     }
-    file.read(frame_buf, 32 * 32 * 2); // packed values are 16-bit
+
+    if (movie_mode == MM_PCM) {
+        file.read(frame_buf, 32 * 32 * 2); // packed values are 16-bit
+    }
+    else if (movie_mode == MM_ZX0) {
+        int sz = dzx0_decompress_frame();
+        switch (sz) {
+            case DZX0_INVALID_DATA:
+                Serial.println("dzx0: invalid data");
+                break;
+            case DZX0_FILE_TOO_LONG: 
+                Serial.println("dzx0: file too long");
+                break;
+            case DZX0_UNKNOWN_STATE:
+                Serial.println("dzx0: unknown state");
+                break;
+            case DZX0_FILE_TRUNCATED:
+                Serial.println("dzx0: file truncated");
+                break;
+            default:
+                break;
+        }
+        //Serial.printf("dzx0: decompressed frame, sz=%d\n", sz);
+    }
+    else {
+        Serial.printf("error: movie_mode=%d\n", movie_mode);
+        return;
+    }
+
     ++movie_frame;
 
     int pcmcnt = 0;
@@ -134,7 +200,6 @@ void movie_get_next_frame_rgbt_pcm(uint32_t *dst, uint8_t *dstpcm)
             pcmcnt++;
         }
     }
-    //Serial.printf("pcmcnt=%d dstpcm=%x old=%x\n", pcmcnt, dstpcm, oldpcm);
 }
 
 void movie_get_next_frame(uint8_t *dst)
