@@ -29,7 +29,7 @@ constexpr float GOAL_FPS = 20; // 10..40 is a good range
 // subpixel clock = fps * 32 * 32 * 8 
 constexpr float SUBPIXEL_CLOCK = GOAL_FPS * 32 * 32 * 8;
 
-constexpr int KICKSTART_TSTEP = 50*1000;
+constexpr int KICKSTART_TSTEP = 60*1000;
 constexpr int KICKSTART_DUTY = 100;
 constexpr int MIN_DUTY = 30;
 constexpr int MAX_DUTY = 240;
@@ -55,7 +55,7 @@ uint32_t tstep = 1000;
 volatile int seq_pos = 0;
 
 int ramp_us = KICKSTART_TSTEP;
-int ramp_us_step = 0; // don't ramp, just prod
+int ramp_us_step = 1000; // don't ramp, just prod
 int ramp_us_min = 2000;
 
 bool ramp_done = false;
@@ -305,8 +305,9 @@ void motor_loop()
             else {
                 if (ramp_us > ramp_us_min) ramp_us -= ramp_us_step;
 
-                if (millis() - start_millis > 1000) {
+                if (ramp_done && (millis() - start_millis > 1000)) {
                     Serial.println("stall 1");
+                    Serial.printf("ramp_done=%d\n", ramp_done);
                     restart_motor();
                 }
             }
