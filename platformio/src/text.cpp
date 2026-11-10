@@ -21,10 +21,8 @@ void text_begin()
 {
     u8g2.setBufferPtr(bitmap);
     u8g2.begin();
-    //u8g2.setFont(u8g2_font_logisoso28_tf);
-    //u8g2.setFont(u8g2_font_logisoso16_tf);
-    //u8g2.setFont(u8g2_font_inb27_mf);
-    u8g2.setFont(u8g2_font_crox5tb_tf);
+    //u8g2.setFont(u8g2_font_crox5tb_tf);
+    u8g2.setFont(u8g2_font_BBSesque_tf);
 }
 
 void text_clear()
@@ -34,8 +32,14 @@ void text_clear()
 
 void text_draw_str(int x, int y, const char *s)
 {
-    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_BBSesque_tf);
     u8g2.drawStr(x, y, s);
+}
+
+void text_draw_symbols(int x, int y, const char *s)
+{
+    u8g2.setFont(u8g2_font_unifont_t_symbols);
+    u8g2.drawUTF8(x, y, s);
 }
 
 static bool get_pixel(int col, int row)

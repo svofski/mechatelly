@@ -7,20 +7,27 @@
 #include "heart1.xbm"
 #include "heart2.xbm"
 
+#include "movie.h"
+
 enum _movie_mode {
     MM_NONE,
     MM_PCM,
     MM_ZX0
 };
 
-int movie_nframes = 0;
 int movie_frame = 0;
-int movie_mode = MM_PCM;
+
+static int movie_nframes = 0;
+static int movie_mode = MM_PCM;
+static int dir_pos = 0;
 static Dir dir;
 static File file;
 
 // 32*32*4
 static uint8_t frame_buf[32 * 32 * 2];
+
+static int dir_count_files();
+static int dir_seek_to(int num);
 
 uint32_t rgbt_unpack(uint8_t rg, uint8_t bt)
 {
@@ -57,7 +64,7 @@ uint32_t rgb_unpack(uint8_t rg, uint8_t bt)
     return r | g | b;
 }
 
-int movie_open()
+int movie_begin()
 {
     if (!LittleFS.begin()) {
         Serial.println("Failed to mount LittleFS");
@@ -65,6 +72,10 @@ int movie_open()
     }
 
     dir = LittleFS.openDir("/");
+
+    Serial.println("File count: "); Serial.println(dir_count_files());
+    dir.rewind();
+    dir_pos = 0;
 
     return 0;
 }
@@ -77,7 +88,59 @@ int read_cb(void *buf, size_t sz)
     return 0;
 }
 
+int dir_seek_to(int num)
+{
+    dir.rewind();
+    dir_pos = 0;
+    while (dir.next()) {
+        dir_pos++;
+        if (dir_pos == num)
+            return dir_pos;
+    }
+    return -1;
+}
+
+int dir_count_files()
+{
+    dir.rewind();
+    int count; 
+    while (dir.next()) {
+        ++count;    
+    }
+
+    return count;
+}
+
+int movie_prev_file()
+{
+    if (dir_pos == 0) {
+        dir_pos = dir_count_files();
+        if (dir_pos == 0) {
+            dir_pos = -1;
+            Serial.println("No files");
+            return -1;
+        }
+    }
+    dir_seek_to(dir_pos - 1);
+
+    return movie_open_current();
+}
+
 int movie_next_file()
+{
+    ++dir_pos;
+    if (!dir.next()) {
+        if (!dir.rewind()) {
+            Serial.println("No files");
+            return -1;
+        }
+        dir_pos = 0;
+    }
+
+    return movie_open_current();
+}
+
+int movie_open_current()
 {
     if (file) {
         if (movie_mode == MM_ZX0) {
@@ -85,13 +148,6 @@ int movie_next_file()
         }
         file.close();
         movie_mode = MM_NONE;
-    }
-
-    if (!dir.next()) {
-        if (!dir.rewind()) {
-            Serial.println("No files");
-            return -1;
-        }
     }
 
     file = dir.openFile("r");
@@ -141,9 +197,7 @@ void movie_get_next_frame_rgbt(uint32_t *dst)
     }
 }
 
-// frames are rrrr gggg bbbb hnib  pcm high nibble
-//            rrrr gggg bbbb lnib  pcm low nibble
-void movie_get_next_frame_rgbt_pcm(uint32_t *dst, uint8_t *dstpcm)
+void movie_advance_frame()
 {
     if (!file || !file.available()) {
         movie_next_file();
@@ -181,7 +235,12 @@ void movie_get_next_frame_rgbt_pcm(uint32_t *dst, uint8_t *dstpcm)
     }
 
     ++movie_frame;
+}
 
+// frames are rrrr gggg bbbb hnib  pcm high nibble
+//            rrrr gggg bbbb lnib  pcm low nibble
+void movie_get_next_frame_rgbt_pcm(uint32_t *dst, uint8_t *dstpcm)
+{
     int pcmcnt = 0;
     uint8_t *oldpcm = dstpcm;
 
@@ -248,7 +307,7 @@ void create_bunny(uint32_t *dst)
 
 void movie_clear(uint32_t *dst)
 {
-    memset(dst, 0, 32*32);
+    memset(dst, 0, 32 * 32 * sizeof(uint32_t));
 }
 
 void movie_heartbeat(uint32_t *dst)

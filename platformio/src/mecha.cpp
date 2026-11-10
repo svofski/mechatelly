@@ -4,10 +4,6 @@
 #define PWMAUDIO 1
 #define SYNC_INTERRUPT 1
 
-#define MODE_MOVIE 1
-#define MODE_HEART 0
-#define MODE_DISPLAYRPS 0
-
 #if PWMAUDIO
 #include <PWMAudio.h>
 #endif
@@ -22,7 +18,7 @@
 
 #include "movie.h"
 #include "text.h"
-
+#include "btn.h"
 
 constexpr float GOAL_FPS = 20; // 10..40 is a good range
 
@@ -46,6 +42,10 @@ constexpr int PIN_LED_G = 13;
 constexpr int PIN_LED_B = 14;
 constexpr int PIN_LED_T = 15;
 
+constexpr int PIN_BTN_PLUS = 6;
+constexpr int PIN_BTN_OK = 8;
+constexpr int PIN_BTN_MINUS = 7;
+
 volatile int32_t interrupt_counter = 0, last_interrupt_counter = 0;
 
 unsigned long start_millis = 0;
@@ -63,6 +63,7 @@ bool ramp_done = false;
 float fduty = 0;
 int duty = 0;
 
+volatile int goal_fps = GOAL_FPS;
 volatile float rps = GOAL_FPS;
 volatile float lps = GOAL_FPS;
 volatile uint64_t diff_us = 1000;
@@ -108,7 +109,28 @@ constexpr uint FRAME_NBYTES = NPIXELS * 4;
 constexpr uint FRAME_NSAMPLES = NPIXELS / 2;
 
 volatile int send_pixels = 0;
+volatile int send_pixels_delay = 80;
 int frame_pixel_pos = 0;
+
+enum class MenuMode : int {
+    NONE,
+    MOVIE,
+    RPS,
+    HEART
+};
+bool freeze_frame = false;
+
+MenuMode menu_mode = MenuMode::MOVIE;
+MenuMode menu_ok_pressed_in = MenuMode::NONE;
+
+const char * flash_text = nullptr;
+const char * flash_text0 = nullptr;
+int flash_nframes = 0;
+int flash_x = 0;
+int flash_x_advance = 0;
+int flash_x_max = 256;
+int flash_x_reset = -38;
+uint8_t flash_font[2] {};
 
 #if PWMAUDIO
 PWMAudio pwm(1);
@@ -201,6 +223,8 @@ void setup()
 
     delay(1000);
 
+    btn_begin(PIN_BTN_PLUS, PIN_BTN_OK, PIN_BTN_MINUS);
+
     // delay until the host answers to serial connection
     // a nice safety mechanism during debuggin
     while (!Serial) {
@@ -211,16 +235,16 @@ void setup()
     pinMode(PIN_V, OUTPUT);
     pinMode(PIN_W, OUTPUT);
 
+    digitalWrite(PIN_U, 0);
+    digitalWrite(PIN_V, 0);
+    digitalWrite(PIN_W, 0);
+
     pinMode(PIN_LED_R, OUTPUT);
     pinMode(PIN_LED_G, OUTPUT);
     pinMode(PIN_LED_B, OUTPUT);
     digitalWrite(PIN_LED_R, 0);
     digitalWrite(PIN_LED_G, 0);
     digitalWrite(PIN_LED_B, 0);
-
-    digitalWrite(PIN_U, 0);
-    digitalWrite(PIN_V, 0);
-    digitalWrite(PIN_W, 0);
 
     Serial.println("Hello from pipico (philhower)");
     Serial.printf("goal fps=%d subpixel clock=%d\n", (int)GOAL_FPS,
@@ -248,7 +272,7 @@ void setup()
 
     //create_test_pattern();
     create_bunny(test_pixels_u32);
-    movie_open();
+    movie_begin();
     text_begin();
     text_draw_str(0, 28, "ALL HAIL THE HYPNOTOAD");
 
@@ -328,13 +352,13 @@ void motor_loop()
             lps = (hsync_interrupt_counter - last_hsync_interrupt_counter) / 1.0f * fac;
             last_hsync_interrupt_counter = hsync_interrupt_counter;
 
-            if (ramp_done && (rps < GOAL_FPS / 4)) {
+            if (ramp_done && (rps < goal_fps / 4)) {
                 Serial.printf("stall 2: rps=%f interrupt_counter=%d last=%d\n", rps, interrupt_counter, last_interrupt_counter);
                 restart_motor();
                 continue;
             }
 
-            float error = rps - GOAL_FPS;
+            float error = rps - goal_fps;
             constexpr float PID_I = 1.0f / fac;
             if (fabs(error) > 0.1f) {
                 if (error > 0) {
@@ -393,18 +417,127 @@ void __not_in_flash_func(sync_interrupt)()
     ++hsync_interrupt_counter;
 
     // add a little centering offset 
-    //add_alarm_in_us(diff_us/32/8, start_frame_cb, nullptr, false);
-
-    //dma_shift_pixels();
-    ++send_pixels;
+    if (send_pixels_delay > 0) {
+        add_alarm_in_us(send_pixels_delay, start_frame_cb, nullptr, false);
+    }
+    else {
+        ++send_pixels;
+    }
 }
-
 
 float subpixel_clock = 32 * 32 * 8 * GOAL_FPS;
 float clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
 
-int text_x = 0;;
-    
+int text_x = 0;
+void flash_menu_mode()
+{
+    flash_x = -38;
+    flash_x_advance = 2;
+    flash_x_max = 256;
+    flash_x_reset = -38;
+    flash_nframes = goal_fps * 4;
+    flash_text0 = nullptr;
+    switch (menu_mode) {
+        case MenuMode::MOVIE:
+            flash_text = "Movie";
+            break;
+        case MenuMode::RPS:
+            flash_text = "RPS";
+            break;
+        case MenuMode::HEART:
+            flash_text = "Test";
+            break;
+    }
+}
+
+void flash_play_pause()
+{
+    flash_text = " \u23f5";
+    flash_font[1] = 1;
+    if (freeze_frame) {
+        flash_text = " \u23f8";
+    }
+    flash_x = 0;
+    flash_x_advance = 0;
+    flash_nframes = GOAL_FPS;
+    flash_font[1] = 1;
+}
+
+void flash_goal_rps()
+{
+    static char rps_buf[8];
+    snprintf(rps_buf, sizeof(rps_buf) - 1, " !%d!", (int)goal_fps); 
+    flash_text0 = " set";
+    flash_text = rps_buf;
+    flash_x = 0;
+    flash_x_advance = 0;
+    flash_nframes = GOAL_FPS;
+    flash_font[1] = 0;
+}
+
+void flash_delay()
+{
+    static char delay_buf[8];
+    snprintf(delay_buf, sizeof(delay_buf) - 1, " +%d", (int)send_pixels_delay); 
+    flash_text0 = "H-ofs";
+    flash_text = delay_buf;
+    flash_x = 0;
+    flash_x_advance = 0;
+    flash_nframes = GOAL_FPS;
+    flash_font[1] = 0;
+}
+
+
+void paint_rps()
+{
+    text_clear();
+    text_draw_str(6, 12, "RPS");
+    snprintf(text_buf, sizeof(text_buf) - 1, "  %d", (int)rps); 
+    text_draw_str(0, 24, text_buf);
+    text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
+}
+
+void paint_like(const char *msg)
+{
+    text_clear();
+    text_draw_str(-text_x, 24, msg);
+    text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
+    text_x += 1;
+    if (text_x >= 256) {
+        text_x = -38;
+    }
+}
+
+void paint_flash()
+{
+    text_clear();
+    if (flash_text0) {
+        switch (flash_font[0]) {
+            case 0:
+                text_draw_str(0, 12, flash_text0);
+                break;
+            case 1:
+                text_draw_symbols(0, 12, flash_text0);
+                break;
+        }
+    }
+    switch (flash_font[1]) {
+        case 0:
+            text_draw_str(-flash_x, 24, flash_text);
+            break;
+        case 1:
+            text_draw_symbols(-flash_x, 24, flash_text);
+            break;
+    }
+    text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
+
+    --flash_nframes;
+    flash_x += flash_x_advance;
+    if (flash_x >= flash_x_max) {
+        flash_x = -flash_x_reset;
+    }
+}
+
 void __not_in_flash_func(loop)() {
 #ifndef SYNC_INTERRUPT
     while ((sio_hw->gpio_in & (1ul << PIN_SYNC)) != 0) tight_loop_contents();
@@ -420,32 +553,44 @@ void __not_in_flash_func(loop)() {
             send_pixels = 0;
         }
 
-        //pio_sm_set_clkdiv(shifter_pio, shifter_sm, clk_div);
         dma_shift_pixels();
 
         // freeze frame
-        if (true || movie_frame < 5) {
-#if MODE_MOVIE
-            movie_get_next_frame_rgbt_pcm(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)],
-                    &pcm_sound_u8[FRAME_NSAMPLES * (pingpong_rd ^ 1)]);
-#elif MODE_DISPLAYRPS
-            movie_heartbeat(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
-            snprintf(text_buf, sizeof(text_buf), "%d", (int)rps); 
-            text_draw_str(0, 24, text_buf);
-            text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
-#elif MODE_HEART
-            movie_heartbeat(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
-            text_draw_str(-text_x, 24, "  Like!  ");
-            text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
-            text_x += 1;
-            if (text_x >= 256) {
-                text_x = -38;
-            }
-#endif
-
-            pingpong_rd ^= 1;
-            pwm_read_index = 0;
+        switch (menu_mode) {
+            case MenuMode::MOVIE:
+                if (!freeze_frame) {
+                    movie_advance_frame();
+                }
+                movie_get_next_frame_rgbt_pcm(
+                        &test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)],
+                        &pcm_sound_u8[FRAME_NSAMPLES * (pingpong_rd ^ 1)]);
+                break;
+            case MenuMode::RPS:
+                {
+                    movie_heartbeat(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+                    if (!flash_nframes) {
+                        paint_rps();
+                    }
+                }
+                break;
+            case MenuMode::HEART:
+                {
+                    if (flash_nframes > 0) {
+                        movie_clear(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+                    }
+                    else {
+                        create_bunny(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+                    }
+                }
+                break;
         }
+
+        if (flash_nframes > 0 && flash_text != nullptr) {
+            paint_flash();
+        }
+
+        pingpong_rd ^= 1;
+        pwm_read_index = 0;
 
         noInterrupts();
         uint64_t diffus_copy = diff_us;
@@ -457,6 +602,81 @@ void __not_in_flash_func(loop)() {
         clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
         pio_sm_set_clkdiv(shifter_pio, shifter_sm, clk_div);
         //exact_sr = 32*32/2 * exact_rps;
+
+        btn_poll();
+        if (btn_pressed(PIN_BTN_MINUS)) {
+            Serial.println("Pressed MINUS");
+            switch (menu_mode) {
+                case MenuMode::MOVIE:
+                    movie_prev_file();
+                    if (freeze_frame) {
+                        movie_advance_frame();
+                    }
+                    break;
+                case MenuMode::RPS:
+                    goal_fps = constrain(goal_fps - 1, 6, 45);
+                    flash_goal_rps();
+                    break;
+                case MenuMode::HEART:
+                    send_pixels_delay = constrain(send_pixels_delay - 10, 0, 800);
+                    flash_delay();
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (btn_pressed(PIN_BTN_PLUS)) {
+            Serial.println("Pressed PLUS");
+            switch (menu_mode) {
+                case MenuMode::MOVIE:
+                    if (freeze_frame) {
+                        movie_advance_frame();
+                    }
+                    else {
+                        movie_next_file();
+                    }
+                    break;
+                case MenuMode::RPS:
+                    goal_fps = constrain(goal_fps + 1, 6, 45);
+                    flash_goal_rps();
+                    break;
+                case MenuMode::HEART:
+                    send_pixels_delay = constrain(send_pixels_delay + 10, 0, 800);
+                    flash_delay();
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (btn_pressed(PIN_BTN_OK)) {
+            menu_ok_pressed_in = menu_mode;
+        }
+        if (btn_released(PIN_BTN_OK)) {
+            Serial.println("Pressed OK");
+            switch (menu_mode) {
+                case MenuMode::MOVIE:
+                    if (menu_ok_pressed_in == MenuMode::MOVIE) {
+                        freeze_frame = !freeze_frame;
+                        flash_play_pause();
+                    }
+                    break;
+                case MenuMode::RPS:
+                    if (menu_ok_pressed_in == MenuMode::RPS) {
+                        goal_fps = GOAL_FPS;
+                        flash_goal_rps();
+                    }
+                    break;
+            }
+        }
+        if (btn_longpress(PIN_BTN_OK)) {
+            Serial.println("Longpress OK");
+            int nextmode = static_cast<int>(menu_mode) + 1;
+            if (nextmode > static_cast<int>(MenuMode::HEART)) {
+                nextmode = 0;
+            }
+            menu_mode = static_cast<MenuMode>(nextmode);
+            flash_menu_mode();
+        }
     }
 }
 
