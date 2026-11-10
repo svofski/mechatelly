@@ -16,11 +16,11 @@
 #include "pico/multicore.h"
 #include "shifter.pio.h"
 
+#include "mecha.h"
 #include "movie.h"
 #include "text.h"
 #include "btn.h"
-
-constexpr float GOAL_FPS = 20; // 10..40 is a good range
+#include "menu.h"
 
 // subpixel clock = fps * 32 * 32 * 8 
 constexpr float SUBPIXEL_CLOCK = GOAL_FPS * 32 * 32 * 8;
@@ -29,22 +29,6 @@ constexpr int KICKSTART_TSTEP = 60*1000;
 constexpr int KICKSTART_DUTY = 100;
 constexpr int MIN_DUTY = 30;
 constexpr int MAX_DUTY = 240;
-
-constexpr int PIN_U = 18;
-constexpr int PIN_V = 19;
-constexpr int PIN_W = 20;
-
-constexpr int PIN_SYNC = 16;  // optical sensor for line or frame sync
-constexpr int PIN_HALL = 17;  // hall sensor for BLDC commutation
-
-constexpr int PIN_LED_R = 12;
-constexpr int PIN_LED_G = 13;
-constexpr int PIN_LED_B = 14;
-constexpr int PIN_LED_T = 15;
-
-constexpr int PIN_BTN_PLUS = 6;
-constexpr int PIN_BTN_OK = 8;
-constexpr int PIN_BTN_MINUS = 7;
 
 volatile int32_t interrupt_counter = 0, last_interrupt_counter = 0;
 
@@ -77,8 +61,6 @@ volatile int hsync_interrupt_counter = 0;
 volatile int last_hsync_interrupt_counter = 0;
 volatile uint64_t last_sync_us = 0;
 
-char text_buf[32];
-
 // frame and pio
 PIO shifter_pio = pio1;
 int shifter_sm;
@@ -94,7 +76,6 @@ int shifter_dma_chan = -1;
 //          rgbtrgbt 
 //          rgbtrgbt 
 
-constexpr int NPIXELS = 32 * 32;
 
 uint32_t test_pixels_u32[NPIXELS * 2];
 uint8_t *test_pixels_u8 = (uint8_t *)test_pixels_u32;
@@ -103,7 +84,7 @@ uint8_t *test_pixels_u8 = (uint8_t *)test_pixels_u32;
 uint32_t pcm_sound_u32[NPIXELS / 2 / sizeof(uint32_t) * 2];
 uint8_t *pcm_sound_u8 = (uint8_t *)pcm_sound_u32;
 
-int pingpong_rd = 0;  // write = pingpong_rd ^1
+volatile int pingpong_rd = 0;  // write = pingpong_rd ^1
 
 constexpr uint FRAME_NBYTES = NPIXELS * 4;
 constexpr uint FRAME_NSAMPLES = NPIXELS / 2;
@@ -112,25 +93,8 @@ volatile int send_pixels = 0;
 volatile int send_pixels_delay = 80;
 int frame_pixel_pos = 0;
 
-enum class MenuMode : int {
-    NONE,
-    MOVIE,
-    RPS,
-    HEART
-};
 bool freeze_frame = false;
 
-MenuMode menu_mode = MenuMode::MOVIE;
-MenuMode menu_ok_pressed_in = MenuMode::NONE;
-
-const char * flash_text = nullptr;
-const char * flash_text0 = nullptr;
-int flash_nframes = 0;
-int flash_x = 0;
-int flash_x_advance = 0;
-int flash_x_max = 256;
-int flash_x_reset = -38;
-uint8_t flash_font[2] {};
 
 #if PWMAUDIO
 PWMAudio pwm(1);
@@ -225,9 +189,14 @@ void setup()
 
     btn_begin(PIN_BTN_PLUS, PIN_BTN_OK, PIN_BTN_MINUS);
 
+    //while (!btn_pressed(PIN_BTN_OK)) tight_loop_contents();
+
     // delay until the host answers to serial connection
     // a nice safety mechanism during debuggin
     while (!Serial) {
+        if (btn_pressed(PIN_BTN_OK)) {
+            break;
+        }
         delay(10); 
     }  
 
@@ -428,116 +397,6 @@ void __not_in_flash_func(sync_interrupt)()
 float subpixel_clock = 32 * 32 * 8 * GOAL_FPS;
 float clk_div = (float)clock_get_hz(clk_sys) / subpixel_clock;
 
-int text_x = 0;
-void flash_menu_mode()
-{
-    flash_x = -38;
-    flash_x_advance = 2;
-    flash_x_max = 256;
-    flash_x_reset = -38;
-    flash_nframes = goal_fps * 4;
-    flash_text0 = nullptr;
-    switch (menu_mode) {
-        case MenuMode::MOVIE:
-            flash_text = "Movie";
-            break;
-        case MenuMode::RPS:
-            flash_text = "RPS";
-            break;
-        case MenuMode::HEART:
-            flash_text = "Test";
-            break;
-    }
-}
-
-void flash_play_pause()
-{
-    flash_text = " \u23f5";
-    flash_font[1] = 1;
-    if (freeze_frame) {
-        flash_text = " \u23f8";
-    }
-    flash_x = 0;
-    flash_x_advance = 0;
-    flash_nframes = GOAL_FPS;
-    flash_font[1] = 1;
-}
-
-void flash_goal_rps()
-{
-    static char rps_buf[8];
-    snprintf(rps_buf, sizeof(rps_buf) - 1, " !%d!", (int)goal_fps); 
-    flash_text0 = " set";
-    flash_text = rps_buf;
-    flash_x = 0;
-    flash_x_advance = 0;
-    flash_nframes = GOAL_FPS;
-    flash_font[1] = 0;
-}
-
-void flash_delay()
-{
-    static char delay_buf[8];
-    snprintf(delay_buf, sizeof(delay_buf) - 1, " +%d", (int)send_pixels_delay); 
-    flash_text0 = "H-ofs";
-    flash_text = delay_buf;
-    flash_x = 0;
-    flash_x_advance = 0;
-    flash_nframes = GOAL_FPS;
-    flash_font[1] = 0;
-}
-
-
-void paint_rps()
-{
-    text_clear();
-    text_draw_str(6, 12, "RPS");
-    snprintf(text_buf, sizeof(text_buf) - 1, "  %d", (int)rps); 
-    text_draw_str(0, 24, text_buf);
-    text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
-}
-
-void paint_like(const char *msg)
-{
-    text_clear();
-    text_draw_str(-text_x, 24, msg);
-    text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
-    text_x += 1;
-    if (text_x >= 256) {
-        text_x = -38;
-    }
-}
-
-void paint_flash()
-{
-    text_clear();
-    if (flash_text0) {
-        switch (flash_font[0]) {
-            case 0:
-                text_draw_str(0, 12, flash_text0);
-                break;
-            case 1:
-                text_draw_symbols(0, 12, flash_text0);
-                break;
-        }
-    }
-    switch (flash_font[1]) {
-        case 0:
-            text_draw_str(-flash_x, 24, flash_text);
-            break;
-        case 1:
-            text_draw_symbols(-flash_x, 24, flash_text);
-            break;
-    }
-    text_copy_to_frame(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)], 0, 0);
-
-    --flash_nframes;
-    flash_x += flash_x_advance;
-    if (flash_x >= flash_x_max) {
-        flash_x = -flash_x_reset;
-    }
-}
-
 void __not_in_flash_func(loop)() {
 #ifndef SYNC_INTERRUPT
     while ((sio_hw->gpio_in & (1ul << PIN_SYNC)) != 0) tight_loop_contents();
@@ -555,7 +414,6 @@ void __not_in_flash_func(loop)() {
 
         dma_shift_pixels();
 
-        // freeze frame
         switch (menu_mode) {
             case MenuMode::MOVIE:
                 if (!freeze_frame) {
@@ -585,7 +443,7 @@ void __not_in_flash_func(loop)() {
                 break;
         }
 
-        if (flash_nframes > 0 && flash_text != nullptr) {
+        if (flash_nframes > 0) {
             paint_flash();
         }
 
@@ -603,80 +461,7 @@ void __not_in_flash_func(loop)() {
         pio_sm_set_clkdiv(shifter_pio, shifter_sm, clk_div);
         //exact_sr = 32*32/2 * exact_rps;
 
-        btn_poll();
-        if (btn_pressed(PIN_BTN_MINUS)) {
-            Serial.println("Pressed MINUS");
-            switch (menu_mode) {
-                case MenuMode::MOVIE:
-                    movie_prev_file();
-                    if (freeze_frame) {
-                        movie_advance_frame();
-                    }
-                    break;
-                case MenuMode::RPS:
-                    goal_fps = constrain(goal_fps - 1, 6, 45);
-                    flash_goal_rps();
-                    break;
-                case MenuMode::HEART:
-                    send_pixels_delay = constrain(send_pixels_delay - 10, 0, 800);
-                    flash_delay();
-                    break;
-                default:
-                    break;
-            }
-        }
-        if (btn_pressed(PIN_BTN_PLUS)) {
-            Serial.println("Pressed PLUS");
-            switch (menu_mode) {
-                case MenuMode::MOVIE:
-                    if (freeze_frame) {
-                        movie_advance_frame();
-                    }
-                    else {
-                        movie_next_file();
-                    }
-                    break;
-                case MenuMode::RPS:
-                    goal_fps = constrain(goal_fps + 1, 6, 45);
-                    flash_goal_rps();
-                    break;
-                case MenuMode::HEART:
-                    send_pixels_delay = constrain(send_pixels_delay + 10, 0, 800);
-                    flash_delay();
-                    break;
-                default:
-                    break;
-            }
-        }
-        if (btn_pressed(PIN_BTN_OK)) {
-            menu_ok_pressed_in = menu_mode;
-        }
-        if (btn_released(PIN_BTN_OK)) {
-            Serial.println("Pressed OK");
-            switch (menu_mode) {
-                case MenuMode::MOVIE:
-                    if (menu_ok_pressed_in == MenuMode::MOVIE) {
-                        freeze_frame = !freeze_frame;
-                        flash_play_pause();
-                    }
-                    break;
-                case MenuMode::RPS:
-                    if (menu_ok_pressed_in == MenuMode::RPS) {
-                        goal_fps = GOAL_FPS;
-                        flash_goal_rps();
-                    }
-                    break;
-            }
-        }
-        if (btn_longpress(PIN_BTN_OK)) {
-            Serial.println("Longpress OK");
-            int nextmode = static_cast<int>(menu_mode) + 1;
-            if (nextmode > static_cast<int>(MenuMode::HEART)) {
-                nextmode = 0;
-            }
-            menu_mode = static_cast<MenuMode>(nextmode);
-            flash_menu_mode();
-        }
+        menu_do_buttons();
     }
 }
 
