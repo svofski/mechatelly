@@ -28,3 +28,7 @@ extern bool freeze_frame;
 extern volatile int pingpong_rd;
 extern volatile float rps;
 extern uint32_t test_pixels_u32[];
+
+extern volatile int hsync_interrupt_counter;
+extern volatile int last_hsync_interrupt_counter;
+extern volatile uint64_t last_sync_us;
