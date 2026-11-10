@@ -2,36 +2,36 @@
 #include <mecha.h>
 #include "motori.h"
 
-uint32_t tstep = 1000;
-volatile int seq_pos = 0;
-
-int ramp_us = KICKSTART_TSTEP;
-int ramp_us_step = 1000; // don't ramp, just prod
-int ramp_us_min = 2000;
-
-bool ramp_done = false;
-
-float fduty = 0;
-int duty = 0;
-
-unsigned long start_millis = 0;
-unsigned long last_millis = 0;
-unsigned long last_int_time = 0;
-
-volatile int32_t interrupt_counter = 0, last_interrupt_counter = 0;
-
 volatile int goal_fps = GOAL_FPS;
 volatile float rps = GOAL_FPS;
-volatile float lps = GOAL_FPS;
 
-volatile bool step_reset = false;
-volatile bool request_restart_motor = false;
+static uint32_t tstep = 1000;
+static volatile int seq_pos = 0;
+
+static int ramp_us = KICKSTART_TSTEP;   // startup switching interval
+static int ramp_us_step = 1000; // ramp up 1000us/step
+static int ramp_us_min = 2000;
+
+static bool ramp_done = false;
+
+static float fduty = 0; // pid duty cycle
+static int duty = 0;  // duty cycle used for pwm
+
+static unsigned long start_millis = 0;    // stall detect during ramp-up
+static unsigned long last_millis = 0;     // pid loop timing
+static volatile unsigned long last_int_time = 0;   // hall int timing
+
+static volatile int32_t interrupt_counter = 0; // rps computation
+static volatile int32_t last_interrupt_counter = 0; // rps computation
+
+static volatile bool step_reset = false; // hall signal to reset sequence
+static volatile bool request_restart_motor = false;
 
 
 
 // trapezoidal sequence
 // U V W
-const uint8_t comm_seq[] { 
+static const uint8_t comm_seq[] { 
     1, 0, 0,
     1, 1, 0,
     0, 1, 0,
@@ -138,7 +138,7 @@ void motor_loop()
         else {
             delayMicroseconds(ramp_us);
 
-            if (ramp_us - ramp_us_step == ramp_us_min || interrupt_counter > 6) {
+            if (ramp_us - ramp_us_step == ramp_us_min || interrupt_counter > 0) {
                 Serial.print("ramp up complete; tstep="); Serial.println(tstep);
 
                 ramp_done = true;
@@ -160,21 +160,25 @@ void motor_loop()
             restart_motor();
         }
 
+        if (ramp_done && (micros() - last_int_time) > 500000) {
+            Serial.printf("stall 2: rps=%f interrupt_counter=%d last=%d\n", rps, interrupt_counter, last_interrupt_counter);
+            restart_motor();
+            continue;
+        }
+
         unsigned long new_millis = millis();
         constexpr float fac = 0.5f; // control loop per second
         if (new_millis - last_millis >= 1000/fac) {
             last_millis = new_millis;
 
             rps = (interrupt_counter - last_interrupt_counter) / 6.0f * fac;
-            //lps = (hsync_interrupt_counter - last_hsync_interrupt_counter) / 32.f * fac;
-            lps = (hsync_interrupt_counter - last_hsync_interrupt_counter) / 1.0f * fac;
             last_hsync_interrupt_counter = hsync_interrupt_counter;
 
-            if (ramp_done && (rps < goal_fps / 4)) {
-                Serial.printf("stall 2: rps=%f interrupt_counter=%d last=%d\n", rps, interrupt_counter, last_interrupt_counter);
-                restart_motor();
-                continue;
-            }
+            //if (ramp_done && rps < 2) {
+            //    Serial.printf("stall 2: rps=%f interrupt_counter=%d last=%d\n", rps, interrupt_counter, last_interrupt_counter);
+            //    restart_motor();
+            //    continue;
+            //}
 
             float error = rps - goal_fps;
             constexpr float PID_I = 1.0f / fac;
@@ -191,7 +195,6 @@ void motor_loop()
             //Serial.printf("duty=%d ", duty);
             //Serial.print(" tstep="); Serial.print(tstep);
             //Serial.print(" rps="); Serial.print(rps);
-            //Serial.print(" lps="); Serial.print(lps);
             //Serial.print(" diff_us="); Serial.print(diff_us);
             //Serial.print(" hsync="); Serial.println(hsync_interrupt_counter);
             last_interrupt_counter = interrupt_counter; 
