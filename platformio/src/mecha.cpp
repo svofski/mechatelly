@@ -178,7 +178,6 @@ void pio_shifter_init()
     shifter_program_init(shifter_pio, shifter_sm, shifter_offset, PIN_LED_R, clk_div);
 
     Serial.printf("shifter program offset=%d clkdiv=\n", shifter_offset); Serial.println(clk_div);
-
 }
 
 void setup()
@@ -414,6 +413,8 @@ void __not_in_flash_func(loop)() {
 
         dma_shift_pixels();
 
+        uint8_t * pcm_frame = &pcm_sound_u8[FRAME_NSAMPLES * (pingpong_rd ^ 1)];
+
         switch (menu_mode) {
             case MenuMode::MOVIE:
                 if (!freeze_frame) {
@@ -421,11 +422,12 @@ void __not_in_flash_func(loop)() {
                 }
                 movie_get_next_frame_rgbt_pcm(
                         &test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)],
-                        &pcm_sound_u8[FRAME_NSAMPLES * (pingpong_rd ^ 1)]);
+                        pcm_frame);
                 break;
             case MenuMode::RPS:
                 {
                     movie_heartbeat(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
+                    movie_stfu(pcm_frame);
                     if (!flash_nframes) {
                         paint_rps();
                     }
@@ -439,6 +441,7 @@ void __not_in_flash_func(loop)() {
                     else {
                         create_bunny(&test_pixels_u32[NPIXELS * (pingpong_rd ^ 1)]);
                     }
+                    movie_stfu(pcm_frame);
                 }
                 break;
         }
@@ -446,9 +449,6 @@ void __not_in_flash_func(loop)() {
         if (flash_nframes > 0) {
             paint_flash();
         }
-
-        pingpong_rd ^= 1;
-        pwm_read_index = 0;
 
         noInterrupts();
         uint64_t diffus_copy = diff_us;
@@ -462,6 +462,13 @@ void __not_in_flash_func(loop)() {
         //exact_sr = 32*32/2 * exact_rps;
 
         menu_do_buttons();
+
+        if (btn_pressed(PIN_BTN_OK) || btn_pressed(PIN_BTN_PLUS) || btn_pressed(PIN_BTN_MINUS)) {
+            movie_beep(&pcm_sound_u8[FRAME_NSAMPLES * (pingpong_rd ^ 1)]);
+        }
+
+        pingpong_rd ^= 1;
+        pwm_read_index = 0;
     }
 }
 

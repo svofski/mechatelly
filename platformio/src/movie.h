@@ -21,3 +21,6 @@ void movie_heartbeat(uint32_t *dst);
 
 uint32_t rgbt_unpack(uint8_t rg, uint8_t bt);
 uint32_t rgb_unpack(uint8_t rg, uint8_t bt);
+
+void movie_beep(uint8_t *dstpcm);
+void movie_stfu(uint8_t *dstpcm);

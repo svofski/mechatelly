@@ -7,6 +7,7 @@
 #include "heart1.xbm"
 #include "heart2.xbm"
 
+#include "mecha.h"
 #include "movie.h"
 
 enum _movie_mode {
@@ -235,6 +236,18 @@ void movie_advance_frame()
     }
 
     ++movie_frame;
+}
+
+void movie_beep(uint8_t *dstpcm)
+{
+    for (uint i = 0; i < NPIXELS / 2; ++i) {
+        *dstpcm++ = (i & 16) ? 0x3f : 0x00;
+    }
+}
+
+void movie_stfu(uint8_t *dstpcm)
+{
+    memset(dstpcm, 0, NPIXELS / 2);
 }
 
 // frames are rrrr gggg bbbb hnib  pcm high nibble
