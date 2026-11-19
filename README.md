@@ -33,10 +33,11 @@ Not a proper BOM, but a list of parts that I used.
  * single A3144 hall sensor for commutation (power by 5V)
  * 10K pullup resistor for the hall sensor (pull up to +3V3)
  * AO3400 MOSFETs 6x: 3 for the motor, 3 for RGB; other mosfets should be able to fully open with 3V3 from the pico
- * 100K inline with MOSFET gates, 100K or 1M pull downs on MOSFET gates to bleed off the charge
+ * 100R inline with MOSFET gates, 100K pull downs on MOSFET gates to bleed off the charge
  * SS34 or similar diodes for motor coil flyback
  * 3W RGB LED (should have separate LED pins, or common anode for low-side switching)
- * TTP223 touch sensor boards for the UI: next/prev, freeze frame, FPS adjust, sync adjust
+ * TTP223 touch sensor boards for the UI: next/prev, freeze frame, FPS adjust, sync adjust (can be replaced with any buttons)
+ * 22..50pF capacitors to tune down TTP223 sensitivity
  
  
 ## Notes
