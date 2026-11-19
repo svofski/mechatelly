@@ -7,11 +7,12 @@ Video: [youtube](https://www.youtube.com/watch?v=4iRMbndLoC4)
 
 ## Features
 
-  * 32-lines
-  * 10-40 FPS, or RPS depening on how you look at it
+  * can be used without computer, only a USB power brick is needed to demo
+  * 32-lines RGB mechanical tv, 10-40 FPS, or RPS depening on how you look at it
+  * diffuser integrated in the disc, simplifies construction and improves visibility
   * All mechanical parts are 3D printed, A1-mini compatible (180x180 build plate)
-  * sound on 3.5mm jack
-
+  * external sound output on 3.5mm jack
+  
 The controller is a RP2040 Raspberry Pi clone. It has 16MB flash which is enough to store plenty of demo video.
 
 ## Build details
@@ -35,6 +36,7 @@ Not a proper BOM, but a list of parts that I used.
  * 100K inline with MOSFET gates, 100K or 1M pull downs on MOSFET gates to bleed off the charge
  * SS34 or similar diodes for motor coil flyback
  * 3W RGB LED (should have separate LED pins, or common anode for low-side switching)
+ * TTP223 touch sensor boards for the UI: next/prev, freeze frame, FPS adjust, sync adjust
  
  
 ## Notes
