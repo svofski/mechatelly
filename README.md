@@ -38,6 +38,7 @@ Not a proper BOM, but a list of parts that I used.
  * 3W RGB LED (should have separate LED pins, or common anode for low-side switching)
  * TTP223 touch sensor boards for the UI: next/prev, freeze frame, FPS adjust, sync adjust (can be replaced with any buttons)
  * 22..50pF capacitors to tune down TTP223 sensitivity
+ * ST188 optical sensor (and resistors)
  
 ## CAD files
 
