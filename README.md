@@ -39,7 +39,10 @@ Not a proper BOM, but a list of parts that I used.
  * TTP223 touch sensor boards for the UI: next/prev, freeze frame, FPS adjust, sync adjust (can be replaced with any buttons)
  * 22..50pF capacitors to tune down TTP223 sensitivity
  
- 
+## CAD files
+
+[cad files](cad)
+
 ## Notes
 
 Extra notes and project build log can be found on [hackaday.io project page](https://hackaday.io/project/207125-mechanical-tv-display)
